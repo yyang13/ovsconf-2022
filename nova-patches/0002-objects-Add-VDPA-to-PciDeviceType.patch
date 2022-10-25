@@ -1,0 +1,84 @@
+From dd0037a1379178104d4cc99bf906a82066c68697 Mon Sep 17 00:00:00 2001
+From: Sean Mooney <work@seanmooney.info>
+Date: Wed, 24 Feb 2021 20:25:50 +0000
+Subject: [PATCH 2/7] objects: Add 'VDPA' to 'PciDeviceType'
+
+Add a new PCI device type and update the parent objects to reflect this.
+The code for handling the '[pci] alias' config option is updated to
+prevent users specifying this in an alias.
+
+Blueprint: libvirt-vdpa-support
+---
+ nova/objects/fields.py     |  6 +++++-
+ nova/objects/pci_device.py | 10 +++++++++-
+ nova/pci/request.py        |  8 +++++++-
+ 3 files changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/nova/objects/fields.py b/nova/objects/fields.py
+index e11841122a..e5dc9fc609 100644
+--- a/nova/objects/fields.py
++++ b/nova/objects/fields.py
+@@ -750,8 +750,12 @@ class PciDeviceType(BaseNovaEnum):
+     STANDARD = "type-PCI"
+     SRIOV_PF = "type-PF"
+     SRIOV_VF = "type-VF"
++    # NOTE(sean-k-mooney): The DB field is Column(String(8), nullable=False)
++    # type-vdpa is 9 long...and as Jay notes above the prefix is silly so
++    # for the new vdpa value we drop the prefix to avoid a DB migration
++    VDPA = "vdpa"
+ 
+-    ALL = (STANDARD, SRIOV_PF, SRIOV_VF)
++    ALL = (STANDARD, SRIOV_PF, SRIOV_VF, VDPA)
+ 
+ 
+ class PCINUMAAffinityPolicy(BaseNovaEnum):
+diff --git a/nova/objects/pci_device.py b/nova/objects/pci_device.py
+index 0efb1980d4..7810399f9b 100644
+--- a/nova/objects/pci_device.py
++++ b/nova/objects/pci_device.py
+@@ -95,7 +95,8 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
+     # Version 1.4: Added parent_addr field
+     # Version 1.5: Added 2 new device statuses: UNCLAIMABLE and UNAVAILABLE
+     # Version 1.6: Added uuid field
+-    VERSION = '1.6'
++    # Version 1.7: Added 'vdpa' to 'dev_type' field
++    VERSION = '1.7'
+ 
+     fields = {
+         'id': fields.IntegerField(),
+@@ -137,6 +138,13 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
+                         status, target_version))
+         if target_version < (1, 6) and 'uuid' in primitive:
+             del primitive['uuid']
++        if target_version < (1, 7) and 'dev_type' in primitive:
++            dev_type = primitive['dev_type']
++            if dev_type == fields.PciDeviceType.VDPA:
++                raise exception.ObjectActionError(
++                    action='obj_make_compatible',
++                    reason='dev_type=%s not supported in version %s' % (
++                        dev_type, target_version))
+ 
+     def update_device(self, dev_dict):
+         """Sync the content from device dictionary to device object.
+diff --git a/nova/pci/request.py b/nova/pci/request.py
+index 4857be2279..03bb3fa11f 100644
+--- a/nova/pci/request.py
++++ b/nova/pci/request.py
+@@ -88,7 +88,13 @@ _ALIAS_SCHEMA = {
+         },
+         "device_type": {
+             "type": "string",
+-            "enum": list(obj_fields.PciDeviceType.ALL),
++            # NOTE(sean-k-mooney): vDPA devices cannot currently be used with
++            # alias-based PCI passthrough so we exclude it here
++            "enum": [
++                obj_fields.PciDeviceType.STANDARD,
++                obj_fields.PciDeviceType.SRIOV_PF,
++                obj_fields.PciDeviceType.SRIOV_VF,
++            ],
+         },
+         "numa_policy": {
+             "type": "string",
+-- 
+2.17.1
+

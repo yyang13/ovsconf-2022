@@ -1,0 +1,144 @@
+From 746bd06e00f255ac934f2c895f22af7bb3e744e9 Mon Sep 17 00:00:00 2001
+From: Stephen Finucane <stephenfin@redhat.com>
+Date: Wed, 10 Mar 2021 18:32:38 +0000
+Subject: [PATCH 5/7] libvirt: Add guest generation for vDPA
+
+Add the ability to generate the libvirt interface XML for a neutron port
+with a vnic_type of vdpa.
+---
+ nova/network/os_vif_util.py   |  2 +-
+ nova/virt/libvirt/config.py   |  2 ++
+ nova/virt/libvirt/designer.py | 16 ++++++++++++++++
+ nova/virt/libvirt/driver.py   |  2 +-
+ nova/virt/libvirt/vif.py      | 21 ++++++++++++++++++++-
+ 5 files changed, 40 insertions(+), 3 deletions(-)
+
+diff --git a/nova/network/os_vif_util.py b/nova/network/os_vif_util.py
+index 0baf82acdd..a3f2fb6147 100644
+--- a/nova/network/os_vif_util.py
++++ b/nova/network/os_vif_util.py
+@@ -332,7 +332,7 @@ def _nova_to_osvif_vif_ovs(vif):
+         interface_id=vif.get('ovs_interfaceid') or vif['id'],
+         datapath_type=vif['details'].get(
+             model.VIF_DETAILS_OVS_DATAPATH_TYPE))
+-    if vnic_type == model.VNIC_TYPE_DIRECT:
++    if vnic_type in (model.VNIC_TYPE_DIRECT, model.VNIC_TYPE_VDPA):
+         obj = _get_vnic_direct_vif_instance(
+             vif,
+             port_profile=_get_ovs_representor_port_profile(vif),
+diff --git a/nova/virt/libvirt/config.py b/nova/virt/libvirt/config.py
+index e41782c58e..184ba35ea9 100644
+--- a/nova/virt/libvirt/config.py
++++ b/nova/virt/libvirt/config.py
+@@ -1782,6 +1782,8 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
+         elif self.net_type == "direct":
+             dev.append(etree.Element("source", dev=self.source_dev,
+                                      mode=self.source_mode))
++        elif self.net_type == "vdpa":
++            dev.append(etree.Element("source", dev=self.source_dev))
+         elif self.net_type == "hostdev":
+             source_elem = etree.Element("source")
+             domain, bus, slot, func = \
+diff --git a/nova/virt/libvirt/designer.py b/nova/virt/libvirt/designer.py
+index 3677ed5280..af2e1ab793 100644
+--- a/nova/virt/libvirt/designer.py
++++ b/nova/virt/libvirt/designer.py
+@@ -151,6 +151,22 @@ def set_vif_host_backend_vhostuser_config(conf, mode, path, rx_queue_size,
+         conf.target_dev = tapname
+ 
+ 
++def set_vif_host_backend_vdpa_config(
++    conf, dev_path, rx_queue_size=None, tx_queue_size=None,
++):
++    """Populate a LibvirtConfigGuestInterface instance
++    with host backend details for a vdpa device.
++
++    NOTE: @rx_queue_size and @tx_queue_size can be None
++    """
++    conf.net_type = "vdpa"
++    conf.source_dev = dev_path
++    if rx_queue_size:
++        conf.vhost_rx_queue_size = rx_queue_size
++    if tx_queue_size:
++        conf.vhost_tx_queue_size = tx_queue_size
++
++
+ def set_vif_mtu_config(conf, mtu):
+     """Populate a LibvirtConfigGuestInterface instance
+     with network mtu.
+diff --git a/nova/virt/libvirt/driver.py b/nova/virt/libvirt/driver.py
+index d770f350d9..de78513753 100644
+--- a/nova/virt/libvirt/driver.py
++++ b/nova/virt/libvirt/driver.py
+@@ -357,7 +357,7 @@ class LibvirtDriver(driver.ComputeDriver):
+                                conn_event_handler=self._handle_conn_event)
+         self._supported_perf_events = []
+ 
+-        self.vif_driver = libvirt_vif.LibvirtGenericVIFDriver()
++        self.vif_driver = libvirt_vif.LibvirtGenericVIFDriver(self._host)
+ 
+         # TODO(mriedem): Long-term we should load up the volume drivers on
+         # demand as needed rather than doing this on startup, as there might
+diff --git a/nova/virt/libvirt/vif.py b/nova/virt/libvirt/vif.py
+index cf47f2dafd..ece1d90919 100644
+--- a/nova/virt/libvirt/vif.py
++++ b/nova/virt/libvirt/vif.py
+@@ -19,6 +19,7 @@
+ """VIF drivers for libvirt."""
+ 
+ import os
++import typing as ty
+ 
+ import os_vif
+ from os_vif import exception as osv_exception
+@@ -41,6 +42,7 @@ from nova import profiler
+ from nova import utils
+ from nova.virt.libvirt import config as vconfig
+ from nova.virt.libvirt import designer
++from nova.virt.libvirt import host as libvirt_host
+ from nova.virt import osinfo
+ 
+ 
+@@ -153,6 +155,10 @@ def ensure_vlan(vlan_num, bridge_interface, mac_address=None, mtu=None,
+ class LibvirtGenericVIFDriver(object):
+     """Generic VIF driver for libvirt networking."""
+ 
++    def __init__(self, host: libvirt_host.Host = None):
++        super().__init__()
++        self.host = host
++
+     def get_vif_devname(self, vif):
+         if 'devname' in vif:
+             return vif['devname']
+@@ -500,6 +506,13 @@ class LibvirtGenericVIFDriver(object):
+             raise exception.InternalError(
+                 _('Unsupported VIF port profile type %s') % profile_name)
+ 
++    def _get_vdpa_dev_path(self, pci_address: ty.Text) -> ty.Text:
++        if self.host is not None:
++            return self.host.get_vdpa_device_path(pci_address)
++        # TODO(sean-k-mooney) this should never be raised remove when host
++        # is not optional in __init__.
++        raise TypeError("self.host must set to use this function.")
++
+     def _get_config_os_vif(self, instance, vif, image_meta, inst_type,
+                            virt_type, vnic_type, disable_offload):
+         """Get the domain config for a VIF
+@@ -528,7 +541,13 @@ class LibvirtGenericVIFDriver(object):
+         elif isinstance(vif, osv_vifs.VIFVHostUser):
+             self._set_config_VIFVHostUser(instance, vif, conf)
+         elif isinstance(vif, osv_vifs.VIFHostDevice):
+-            self._set_config_VIFHostDevice(instance, vif, conf)
++            if vnic_type != network_model.VNIC_TYPE_VDPA:
++                self._set_config_VIFHostDevice(instance, vif, conf)
++            else:
++                dev_path = self._get_vdpa_dev_path(vif.dev_address)
++                designer.set_vif_host_backend_vdpa_config(
++                    conf, dev_path, CONF.libvirt.rx_queue_size,
++                    CONF.libvirt.tx_queue_size)
+         else:
+             raise exception.InternalError(
+                 _("Unsupported VIF type %s") % vif.obj_name())
+-- 
+2.17.1
+

@@ -1,0 +1,61 @@
+From ae22fe4495f90b69b5d753376d55e6150508ec5b Mon Sep 17 00:00:00 2001
+From: Sean Mooney <work@seanmooney.info>
+Date: Wed, 28 Oct 2020 04:20:41 +0000
+Subject: [PATCH] Add support for VNIC type vDPA to ML2/OVS and ML2/OVN
+
+This change adds VNIC type vDPA ("vdpa") to the list of
+supported VNIC types for the OVS and OVN mech drivers.
+
+Depends-On: https://review.opendev.org/#/c/760043/
+Change-Id: If22aedc147f7e2256f8f8ad3bebb80b6bb2f6d3d
+---
+ .../mech_driver/mech_openvswitch.py           |  9 +++++++-
+ .../drivers/ovn/mech_driver/mech_driver.py    |  4 +++-
+ .../mech_driver/test_mech_openvswitch.py      |  4 +++-
+ .../ovn/mech_driver/test_mech_driver.py       | 21 +++++++++++++++++++
+ .../notes/vhost-vdpa-4597a27de6232350.yaml    | 14 +++++++++++++
+ 5 files changed, 49 insertions(+), 3 deletions(-)
+ create mode 100644 releasenotes/notes/vhost-vdpa-4597a27de6232350.yaml
+
+diff --git a/neutron/plugins/ml2/drivers/openvswitch/mech_driver/mech_openvswitch.py b/neutron/plugins/ml2/drivers/openvswitch/mech_driver/mech_openvswitch.py
+index c4e6e61fbb..c658b6a1dd 100644
+--- a/neutron/plugins/ml2/drivers/openvswitch/mech_driver/mech_openvswitch.py
++++ b/neutron/plugins/ml2/drivers/openvswitch/mech_driver/mech_openvswitch.py
+@@ -75,7 +75,9 @@ class OpenvswitchMechanismDriver(mech_agent.SimpleAgentMechanismDriverBase):
+         self.supported_vnic_types = self.prohibit_list_supported_vnic_types(
+             vnic_types=[portbindings.VNIC_NORMAL,
+                         portbindings.VNIC_DIRECT,
+-                        portbindings.VNIC_SMARTNIC],
++                        portbindings.VNIC_SMARTNIC,
++                        portbindings.VNIC_VHOST_VDPA,
++                        ],
+             prohibit_list=cfg.CONF.OVS_DRIVER.vnic_type_prohibit_list
+         )
+         LOG.info("%s's supported_vnic_types: %s",
+@@ -121,6 +123,11 @@ class OpenvswitchMechanismDriver(mech_agent.SimpleAgentMechanismDriverBase):
+         capabilities = []
+         if profile:
+             capabilities = profile.get('capabilities', [])
++        # TODO(sean-k-mooney): in the case of the Mellanox connectx6 dx and lx
++        # nics vhost-vdpa is only supported in switchdev mode but that is not
++        # strictly required by other vendors so we should ideally add a config
++        # value to control checking of switchdev support per host via the
++        # agent['configurations']
+         if (vnic_type == portbindings.VNIC_DIRECT and
+                 'switchdev' not in capabilities):
+             LOG.debug("Refusing to bind due to unsupported vnic_type: %s with "
+diff --git a/neutron/plugins/ml2/drivers/ovn/mech_driver/mech_driver.py b/neutron/plugins/ml2/drivers/ovn/mech_driver/mech_driver.py
+index 463067f12d..5fe370aa14 100644
+--- a/neutron/plugins/ml2/drivers/ovn/mech_driver/mech_driver.py
++++ b/neutron/plugins/ml2/drivers/ovn/mech_driver/mech_driver.py
+@@ -176,7 +176,9 @@ class OVNMechanismDriver(api.MechanismDriver):
+         self.supported_vnic_types = [portbindings.VNIC_NORMAL,
+                                      portbindings.VNIC_DIRECT,
+                                      portbindings.VNIC_DIRECT_PHYSICAL,
+-                                     portbindings.VNIC_MACVTAP]
++                                     portbindings.VNIC_MACVTAP,
++                                     portbindings.VNIC_VHOST_VDPA,
++                                     ]
+         self.vif_details = {
+             portbindings.VIF_TYPE_OVS: {
+                 portbindings.CAP_PORT_FILTER: self.sg_enabled

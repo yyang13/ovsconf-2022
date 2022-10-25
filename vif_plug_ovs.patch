@@ -1,0 +1,23 @@
+--- a/ovs.py	2022-05-30 17:20:46.027097045 +0800
++++ b/ovs.py	2022-05-30 17:20:27.612860504 +0800
+@@ -262,6 +262,12 @@ class OvsPlugin(plugin.PluginBase):
+         datapath = self._get_vif_datapath_type(vif)
+         self.ovsdb.ensure_ovs_bridge(vif.network.bridge, datapath)
+         pci_slot = vif.dev_address
++        # Hacking for SF
++        representor="en7f0pf0sf89"
++        args = [vif, representor, instance_info]
++        kwargs = {}
++        self._create_vif_port(*args, **kwargs)
++        """
+         vf_num = linux_net.get_vf_num_by_pci_address(pci_slot)
+         args = []
+         kwargs = {}
+@@ -280,6 +286,7 @@ class OvsPlugin(plugin.PluginBase):
+                       'pf_pci': pf_pci,
+                       'vf_num': vf_num}
+         self._create_vif_port(*args, **kwargs)
++        """
+ 
+     def plug(self, vif, instance_info):
+         if not hasattr(vif, "port_profile"):

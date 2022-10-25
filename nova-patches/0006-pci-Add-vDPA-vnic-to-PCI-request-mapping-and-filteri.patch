@@ -1,0 +1,159 @@
+From 1422e2132c12e740e8bfcbe982d47f83b36bf2ab Mon Sep 17 00:00:00 2001
+From: Sean Mooney <work@seanmooney.info>
+Date: Wed, 3 Mar 2021 02:00:45 +0000
+Subject: [PATCH 6/7] pci: Add vDPA vnic to PCI request mapping and filtering
+
+This change extend the vnic type to PCI request dev type mapping to
+support the vDPA vnic type.
+
+This change extends the PCI stats module to filter out VDPA 'dev_type'
+pools if its not explicitly requested.
+
+This change explicitly filters out the vDPA dev_type from the pci alias
+schema since that is not supported.
+
+Blueprint: libvirt-vdpa-support
+---
+ nova/objects/pci_device.py | 12 +++++++++---
+ nova/pci/manager.py        |  4 +++-
+ nova/pci/request.py        |  3 ++-
+ nova/pci/stats.py          | 37 ++++++++++++++++++++++++++++++++++---
+ 4 files changed, 48 insertions(+), 8 deletions(-)
+
+diff --git a/nova/objects/pci_device.py b/nova/objects/pci_device.py
+index 7810399f9b..02db20f45b 100644
+--- a/nova/objects/pci_device.py
++++ b/nova/objects/pci_device.py
+@@ -304,7 +304,9 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
+             self._bulk_update_status(vfs_list,
+                                            fields.PciDeviceStatus.UNCLAIMABLE)
+ 
+-        elif self.dev_type == fields.PciDeviceType.SRIOV_VF:
++        elif self.dev_type in (
++            fields.PciDeviceType.SRIOV_VF, fields.PciDeviceType.VDPA
++        ):
+             # Update VF status to CLAIMED if it's parent has not been
+             # previously allocated or claimed
+             # When claiming/allocating a VF, it's parent PF becomes
+@@ -364,7 +366,9 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
+             self._bulk_update_status(vfs_list,
+                                      fields.PciDeviceStatus.UNAVAILABLE)
+ 
+-        elif (self.dev_type == fields.PciDeviceType.SRIOV_VF):
++        elif self.dev_type in (
++            fields.PciDeviceType.SRIOV_VF, fields.PciDeviceType.VDPA
++        ):
+             parent = self.parent_device
+             if parent:
+                 if parent.status not in parent_ok_statuses:
+@@ -423,7 +427,9 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
+             self._bulk_update_status(vfs_list,
+                                      fields.PciDeviceStatus.AVAILABLE)
+             free_devs.extend(vfs_list)
+-        if self.dev_type == fields.PciDeviceType.SRIOV_VF:
++        if self.dev_type in (
++            fields.PciDeviceType.SRIOV_VF, fields.PciDeviceType.VDPA
++        ):
+             # Set PF status to AVAILABLE if all of it's VFs are free
+             parent = self.parent_device
+             if not parent:
+diff --git a/nova/pci/manager.py b/nova/pci/manager.py
+index 05930b0beb..8554b6f9ef 100644
+--- a/nova/pci/manager.py
++++ b/nova/pci/manager.py
+@@ -152,7 +152,9 @@ class PciDevTracker(object):
+             if dev.dev_type == fields.PciDeviceType.SRIOV_PF:
+                 dev.child_devices = []
+                 parents[dev.address] = dev
+-            elif dev.dev_type == fields.PciDeviceType.SRIOV_VF:
++            elif dev.dev_type in (
++                fields.PciDeviceType.SRIOV_VF, fields.PciDeviceType.VDPA
++            ):
+                 dev.parent_device = parents.get(dev.parent_addr)
+                 if dev.parent_device:
+                     parents[dev.parent_addr].child_devices.append(dev)
+diff --git a/nova/pci/request.py b/nova/pci/request.py
+index 03bb3fa11f..7d92a1d11e 100644
+--- a/nova/pci/request.py
++++ b/nova/pci/request.py
+@@ -57,7 +57,8 @@ PCI_TRUSTED_TAG = 'trusted'
+ PCI_DEVICE_TYPE_TAG = 'dev_type'
+ 
+ DEVICE_TYPE_FOR_VNIC_TYPE = {
+-    network_model.VNIC_TYPE_DIRECT_PHYSICAL: obj_fields.PciDeviceType.SRIOV_PF
++    network_model.VNIC_TYPE_DIRECT_PHYSICAL: obj_fields.PciDeviceType.SRIOV_PF,
++    network_model.VNIC_TYPE_VDPA: obj_fields.PciDeviceType.VDPA,
+ }
+ 
+ CONF = nova.conf.CONF
+diff --git a/nova/pci/stats.py b/nova/pci/stats.py
+index 232e94ff6f..dbac2332f1 100644
+--- a/nova/pci/stats.py
++++ b/nova/pci/stats.py
+@@ -223,15 +223,18 @@ class PciDeviceStats(object):
+ 
+         In case the device is a PF, all of it's dependent VFs should
+         be removed from pools count, if these are present.
+-        When the device is a VF, it's parent PF pool count should be
+-        decreased, unless it is no longer in a pool.
++        When the device is a VF, or a VDPA device, it's parent PF
++        pool count should be decreased, unless it is no longer in a pool.
+         """
+         if pci_dev.dev_type == fields.PciDeviceType.SRIOV_PF:
+             vfs_list = pci_dev.child_devices
+             if vfs_list:
+                 for vf in vfs_list:
+                     self.remove_device(vf)
+-        elif pci_dev.dev_type == fields.PciDeviceType.SRIOV_VF:
++        elif pci_dev.dev_type in (
++            fields.PciDeviceType.SRIOV_VF,
++            fields.PciDeviceType.VDPA,
++        ):
+             try:
+                 parent = pci_dev.parent_device
+                 # Make sure not to decrease PF pool count if this parent has
+@@ -326,6 +329,29 @@ class PciDeviceStats(object):
+         return [pool for pool in pools
+                 if not pool.get('dev_type') == fields.PciDeviceType.SRIOV_PF]
+ 
++    @staticmethod
++    def _filter_pools_for_unrequested_vdpa_devices(pools, request):
++        """Filter out pools with VDPA devices, unless these are required.
++
++        This is necessary as vdpa devices require special handling and
++        should not be allocated to generic pci device requests.
++
++        :param pools: A list of PCI device pool dicts
++        :param request: An InstancePCIRequest object describing the type,
++            quantity and required NUMA affinity of device(s) we want.
++        :returns: A list of pools that can be used to support the request if
++            this is possible.
++        """
++        if all(
++            spec.get('dev_type') != fields.PciDeviceType.VDPA
++            for spec in request.spec
++        ):
++            pools = [
++                pool for pool in pools
++                if not pool.get('dev_type') == fields.PciDeviceType.VDPA
++            ]
++        return pools
++
+     def _apply_request(self, pools, request, numa_cells=None):
+         """Apply a PCI request.
+ 
+@@ -368,6 +394,11 @@ class PciDeviceStats(object):
+         matching_pools = self._filter_non_requested_pfs(matching_pools,
+                                                         request)
+ 
++        # Exclude unrequested vdpa devices
++        matching_pools = self._filter_pools_for_unrequested_vdpa_devices(
++                             matching_pools,
++                             request)
++
+         # Do we still have any devices left?
+         if sum([pool['count'] for pool in matching_pools]) < count:
+             return False
+-- 
+2.17.1
+

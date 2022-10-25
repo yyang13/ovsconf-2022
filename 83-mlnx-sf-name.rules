@@ -1,0 +1,10 @@
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="b8:ce:f6:4e:90:60", NAME="enp7s0f0"
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="b8:ce:f6:4e:90:61", NAME="enp7s0f1"
+
+SUBSYSTEM=="net", ACTION=="add", ATTR{phys_switch_id}!="", ATTR{phys_port_name}!="", ATTR{phys_port_name}=="*pf*sf*" \
+    IMPORT{program}="/sbin/sf-rep-netdev-rename $attr{phys_port_name} $attr{ifindex}" \
+    NAME="$env{NAME}"
+
+SUBSYSTEM=="net", SUBSYSTEMS=="auxiliary", ACTION=="add", ATTRS{sfnum}!="", \
+    IMPORT{program}="/sbin/auxdev-sf-netdev-rename $attr{sfnum} $attr{ifindex}" \
+    NAME="$env{SF_NETDEV_NAME}"

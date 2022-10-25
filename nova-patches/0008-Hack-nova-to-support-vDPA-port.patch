@@ -1,0 +1,106 @@
+From 31c65c2486870ef4f5af08fef2a51126d1e659aa Mon Sep 17 00:00:00 2001
+From: Yi Yang <yangyi01@inspur.com>
+Date: Sat, 8 Oct 2022 05:54:48 -0400
+Subject: [PATCH] Hack nova to support vDPA port
+
+Signed-off-by: Yi Yang <yangyi01@inspur.com>
+---
+ nova/pci/stats.py           | 12 ++++++++++++
+ nova/virt/libvirt/driver.py |  4 ++--
+ nova/virt/libvirt/host.py   |  4 +++-
+ 3 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/nova/pci/stats.py b/nova/pci/stats.py
+index dbac2332f1..7f1e82834b 100644
+--- a/nova/pci/stats.py
++++ b/nova/pci/stats.py
+@@ -190,9 +190,16 @@ class PciDeviceStats(object):
+                 pools = self._filter_pools_for_numa_cells(
+                     pools, numa_cells, numa_policy, count)
+             pools = self._filter_non_requested_pfs(pools, request)
++            # Yang Yi added: we need to handle vDPA request specially. 
++            for spec1 in spec:
++                if spec1.get('dev_type') == fields.PciDeviceType.VDPA:
++                    pools = self.pools
++                    break
++
+             # Failed to allocate the required number of devices
+             # Return the devices already allocated back to their pools
+             if sum([pool['count'] for pool in pools]) < count:
++                LOG.info("self.pools = %s", self.pools)
+                 LOG.error("Failed to allocate PCI devices for instance. "
+                           "Unassigning devices back to pools. "
+                           "This should not happen, since the scheduler "
+@@ -372,6 +379,7 @@ class PciDeviceStats(object):
+         # NOTE(vladikr): This code maybe open to race conditions.
+         # Two concurrent requests may succeed when called support_requests
+         # because this method does not remove related devices from the pools
++        LOG.info("_apply_request: %s", request)
+         count = request.count
+ 
+         # Firstly, let's exclude all devices that don't match our spec (e.g.
+@@ -399,6 +407,10 @@ class PciDeviceStats(object):
+                              matching_pools,
+                              request)
+ 
++        for spec in request.spec:
++            if spec.get('dev_type') == fields.PciDeviceType.VDPA:
++                return True
++
+         # Do we still have any devices left?
+         if sum([pool['count'] for pool in matching_pools]) < count:
+             return False
+diff --git a/nova/virt/libvirt/driver.py b/nova/virt/libvirt/driver.py
+index de78513753..c961287745 100644
+--- a/nova/virt/libvirt/driver.py
++++ b/nova/virt/libvirt/driver.py
+@@ -169,7 +169,7 @@ GuestNumaConfig = collections.namedtuple(
+ VIR_DOMAIN_AFFECT_CURRENT = 0
+ VIR_DOMAIN_AFFECT_LIVE = 1
+ VIR_DOMAIN_AFFECT_CONFIG = 2
+-
++VIR_CONNECT_LIST_NODE_DEVICES_CAP_VDPA = 1 << 17
+ 
+ class InjectionInfo(collections.namedtuple(
+         'InjectionInfo', ['network_info', 'files', 'admin_pass'])):
+@@ -7230,7 +7230,7 @@ class LibvirtDriver(driver.ComputeDriver):
+         if self._host.has_min_version(
+             lv_ver=MIN_LIBVIRT_VDPA, hv_ver=MIN_QEMU_VDPA,
+         ):
+-            dev_flags |= libvirt.VIR_CONNECT_LIST_NODE_DEVICES_CAP_VDPA
++            dev_flags |= VIR_CONNECT_LIST_NODE_DEVICES_CAP_VDPA
+ 
+         devices = {
+             dev.name(): dev for dev in
+diff --git a/nova/virt/libvirt/host.py b/nova/virt/libvirt/host.py
+index 071633ad48..577b0850c6 100644
+--- a/nova/virt/libvirt/host.py
++++ b/nova/virt/libvirt/host.py
+@@ -54,6 +54,7 @@ from nova.i18n import _
+ from nova import rpc
+ from nova import utils
+ from nova.pci import utils as pci_utils
++from nova.objects import fields
+ from nova.virt import event as virtevent
+ from nova.virt.libvirt import config as vconfig
+ from nova.virt.libvirt import guest as libvirt_guest
+@@ -78,6 +79,7 @@ CONF = nova.conf.CONF
+ # This is *not* the complete list of supported hypervisor drivers.
+ HV_DRIVER_QEMU = "QEMU"
+ HV_DRIVER_XEN = "Xen"
++VIR_CONNECT_LIST_NODE_DEVICES_CAP_VDPA = 1 << 17
+ 
+ SEV_KERNEL_PARAM_FILE = '/sys/module/kvm_amd/parameters/sev'
+ 
+@@ -1277,7 +1279,7 @@ class Host(object):
+         :raises: StopIteration if not found
+         """
+         dev_flags = (
+-            libvirt.VIR_CONNECT_LIST_NODE_DEVICES_CAP_VDPA |
++            VIR_CONNECT_LIST_NODE_DEVICES_CAP_VDPA |
+             libvirt.VIR_CONNECT_LIST_NODE_DEVICES_CAP_PCI_DEV
+         )
+         devices = {
+-- 
+2.17.1
+

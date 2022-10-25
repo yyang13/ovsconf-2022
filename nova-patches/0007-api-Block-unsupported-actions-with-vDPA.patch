@@ -1,0 +1,323 @@
+From 9660411d80980c8109dac11f89cb7cdd3377a5af Mon Sep 17 00:00:00 2001
+From: Sean Mooney <work@seanmooney.info>
+Date: Fri, 12 Mar 2021 19:28:46 +0000
+Subject: [PATCH 7/7] api: Block unsupported actions with vDPA
+
+There are a number of operations that are known not to work with vDPA
+interfaces and another few that may work but haven't been tested. Start
+blocking these. In all cases where an operation is blocked a HTTP 409
+(Conflict) is returned. This will allow lifecycle operations to be
+enabled as they are tested or bugs are addressed.
+
+Blueprint: libvirt-vdpa-support
+---
+ .../openstack/compute/attach_interfaces.py    | 14 ++--
+ nova/api/openstack/compute/evacuate.py        |  5 +-
+ nova/api/openstack/compute/migrate_server.py  |  2 +
+ nova/api/openstack/compute/rescue.py          |  1 +
+ nova/api/openstack/compute/servers.py         |  2 +
+ nova/api/openstack/compute/shelve.py          |  1 +
+ nova/api/openstack/compute/suspend_server.py  |  7 +-
+ nova/compute/api.py                           | 70 ++++++++++++++++++-
+ nova/exception.py                             |  8 +++
+ 9 files changed, 100 insertions(+), 10 deletions(-)
+
+diff --git a/nova/api/openstack/compute/attach_interfaces.py b/nova/api/openstack/compute/attach_interfaces.py
+index c63497fc11..816529fd1b 100644
+--- a/nova/api/openstack/compute/attach_interfaces.py
++++ b/nova/api/openstack/compute/attach_interfaces.py
+@@ -177,9 +177,12 @@ class InterfaceAttachmentController(wsgi.Controller):
+                 exception.NetworksWithQoSPolicyNotSupported,
+                 exception.InterfaceAttachPciClaimFailed) as e:
+             raise exc.HTTPBadRequest(explanation=e.format_message())
+-        except (exception.InstanceIsLocked,
+-                exception.FixedIpAlreadyInUse,
+-                exception.PortInUse) as e:
++        except (
++            exception.OperationNotSupportedForVDPAInterface,
++            exception.InstanceIsLocked,
++            exception.FixedIpAlreadyInUse,
++            exception.PortInUse,
++        ) as e:
+             raise exc.HTTPConflict(explanation=e.format_message())
+         except (exception.PortNotFound,
+                 exception.NetworkNotFound) as e:
+@@ -213,7 +216,10 @@ class InterfaceAttachmentController(wsgi.Controller):
+                 instance, port_id=port_id)
+         except exception.PortNotFound as e:
+             raise exc.HTTPNotFound(explanation=e.format_message())
+-        except exception.InstanceIsLocked as e:
++        except (
++            exception.OperationNotSupportedForVDPAInterface,
++            exception.InstanceIsLocked,
++        ) as e:
+             raise exc.HTTPConflict(explanation=e.format_message())
+         except NotImplementedError:
+             common.raise_feature_not_supported()
+diff --git a/nova/api/openstack/compute/evacuate.py b/nova/api/openstack/compute/evacuate.py
+index 5e074548f6..9365c2c52f 100644
+--- a/nova/api/openstack/compute/evacuate.py
++++ b/nova/api/openstack/compute/evacuate.py
+@@ -146,7 +146,10 @@ class EvacuateController(wsgi.Controller):
+             raise exc.HTTPBadRequest(explanation=e.format_message())
+         except exception.ForbiddenWithAccelerators as e:
+             raise exc.HTTPForbidden(explanation=e.format_message())
+-        except exception.OperationNotSupportedForVTPM as e:
++        except (
++            exception.OperationNotSupportedForVTPM,
++            exception.OperationNotSupportedForVDPAInterface,
++        ) as e:
+             raise exc.HTTPConflict(explanation=e.format_message())
+ 
+         if (not api_version_request.is_supported(req, min_version='2.14') and
+diff --git a/nova/api/openstack/compute/migrate_server.py b/nova/api/openstack/compute/migrate_server.py
+index 2ec92c5ab3..547f8098f4 100644
+--- a/nova/api/openstack/compute/migrate_server.py
++++ b/nova/api/openstack/compute/migrate_server.py
+@@ -82,6 +82,7 @@ class MigrateServerController(wsgi.Controller):
+             exception.InstanceIsLocked,
+             exception.InstanceNotReady,
+             exception.ServiceUnavailable,
++            exception.OperationNotSupportedForVDPAInterface,
+         ) as e:
+             raise exc.HTTPConflict(explanation=e.format_message())
+         except exception.InstanceInvalidState as state_error:
+@@ -174,6 +175,7 @@ class MigrateServerController(wsgi.Controller):
+         except (
+             exception.OperationNotSupportedForSEV,
+             exception.OperationNotSupportedForVTPM,
++            exception.OperationNotSupportedForVDPAInterface,
+         ) as e:
+             raise exc.HTTPConflict(explanation=e.format_message())
+         except exception.InstanceIsLocked as e:
+diff --git a/nova/api/openstack/compute/rescue.py b/nova/api/openstack/compute/rescue.py
+index 242bb7d0ed..80ad974fd8 100644
+--- a/nova/api/openstack/compute/rescue.py
++++ b/nova/api/openstack/compute/rescue.py
+@@ -66,6 +66,7 @@ class RescueController(wsgi.Controller):
+         except (
+             exception.InstanceIsLocked,
+             exception.OperationNotSupportedForVTPM,
++            exception.OperationNotSupportedForVDPAInterface,
+             exception.InvalidVolume,
+         ) as e:
+             raise exc.HTTPConflict(explanation=e.format_message())
+diff --git a/nova/api/openstack/compute/servers.py b/nova/api/openstack/compute/servers.py
+index 7bc63cdb45..5c8f9edc53 100644
+--- a/nova/api/openstack/compute/servers.py
++++ b/nova/api/openstack/compute/servers.py
+@@ -966,6 +966,7 @@ class ServersController(wsgi.Controller):
+             raise exc.HTTPForbidden(
+                 explanation=error.format_message())
+         except (
++            exception.OperationNotSupportedForVDPAInterface,
+             exception.InstanceIsLocked,
+             exception.InstanceNotReady,
+             exception.MixedInstanceNotSupportByComputeService,
+@@ -1121,6 +1122,7 @@ class ServersController(wsgi.Controller):
+         except (
+             exception.InstanceIsLocked,
+             exception.OperationNotSupportedForVTPM,
++            exception.OperationNotSupportedForVDPAInterface,
+         ) as e:
+             raise exc.HTTPConflict(explanation=e.format_message())
+         except exception.InstanceInvalidState as state_error:
+diff --git a/nova/api/openstack/compute/shelve.py b/nova/api/openstack/compute/shelve.py
+index 4aef6bf3ef..528afd103a 100644
+--- a/nova/api/openstack/compute/shelve.py
++++ b/nova/api/openstack/compute/shelve.py
+@@ -54,6 +54,7 @@ class ShelveController(wsgi.Controller):
+         except (
+             exception.InstanceIsLocked,
+             exception.OperationNotSupportedForVTPM,
++            exception.OperationNotSupportedForVDPAInterface,
+             exception.UnexpectedTaskStateError,
+         ) as e:
+             raise exc.HTTPConflict(explanation=e.format_message())
+diff --git a/nova/api/openstack/compute/suspend_server.py b/nova/api/openstack/compute/suspend_server.py
+index 32312519cb..db5e8ff48b 100644
+--- a/nova/api/openstack/compute/suspend_server.py
++++ b/nova/api/openstack/compute/suspend_server.py
+@@ -38,8 +38,11 @@ class SuspendServerController(wsgi.Controller):
+                         target={'user_id': server.user_id,
+                                 'project_id': server.project_id})
+             self.compute_api.suspend(context, server)
+-        except (exception.OperationNotSupportedForSEV,
+-                exception.InstanceIsLocked) as e:
++        except (
++            exception.OperationNotSupportedForSEV,
++            exception.OperationNotSupportedForVDPAInterface,
++            exception.InstanceIsLocked,
++        ) as e:
+             raise exc.HTTPConflict(explanation=e.format_message())
+         except exception.InstanceInvalidState as state_error:
+             common.raise_http_conflict_for_instance_invalid_state(state_error,
+diff --git a/nova/compute/api.py b/nova/compute/api.py
+index d963410642..79addfc60f 100644
+--- a/nova/compute/api.py
++++ b/nova/compute/api.py
+@@ -285,6 +285,27 @@ def _diff_dict(orig, new):
+     return result
+ 
+ 
++def reject_vdpa_instances(operation):
++    """Reject requests to decorated function if instance has vDPA interfaces.
++
++    Raise OperationNotSupportedForVDPAInterfaces if operations involves one or
++        more vDPA interfaces.
++    """
++
++    def outer(f):
++        @functools.wraps(f)
++        def inner(self, context, instance, *args, **kw):
++            if any(
++                vif['vnic_type'] == network_model.VNIC_TYPE_VDPA
++                for vif in instance.get_network_info()
++            ):
++                raise exception.OperationNotSupportedForVDPAInterface(
++                    instance_uuid=instance.uuid, operation=operation)
++            return f(self, context, instance, *args, **kw)
++        return inner
++    return outer
++
++
+ def load_cells():
+     global CELLS
+     if not CELLS:
+@@ -3940,6 +3961,9 @@ class API(base.Base):
+ 
+     # TODO(stephenfin): This logic would be so much easier to grok if we
+     # finally split resize and cold migration into separate code paths
++    # FIXME(sean-k-mooney): Cold migrate and resize to different hosts
++    # probably works but they have not been tested so block them for now
++    @reject_vdpa_instances(instance_actions.RESIZE)
+     @block_accelerators()
+     @check_instance_lock
+     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.STOPPED])
+@@ -3954,6 +3978,7 @@ class API(base.Base):
+         host_name is always None in the resize case.
+         host_name can be set in the cold migration case only.
+         """
++
+         allow_cross_cell_resize = self._allow_cross_cell_resize(
+             context, instance)
+ 
+@@ -4163,6 +4188,9 @@ class API(base.Base):
+             allow_same_host = CONF.allow_resize_to_same_host
+         return allow_same_host
+ 
++    # FIXME(sean-k-mooney): Shelve works but unshelve does not due to bug
++    # #1851545, so block it for now
++    @reject_vdpa_instances(instance_actions.SHELVE)
+     @reject_vtpm_instances(instance_actions.SHELVE)
+     @block_accelerators()
+     @check_instance_lock
+@@ -4182,7 +4210,6 @@ class API(base.Base):
+         instance.system_metadata.update(
+                 {'image_base_image_ref': instance.image_ref}
+         )
+-
+         instance.save(expected_task_state=[None])
+ 
+         self._record_action_start(context, instance, instance_actions.SHELVE)
+@@ -4345,6 +4372,10 @@ class API(base.Base):
+         return self.compute_rpcapi.get_instance_diagnostics(context,
+                                                             instance=instance)
+ 
++    # FIXME(sean-k-mooney): Suspend does not work because we do not unplug
++    # the vDPA devices before calling managed save as we do with SR-IOV
++    # devices
++    @reject_vdpa_instances(instance_actions.SUSPEND)
+     @block_accelerators()
+     @reject_sev_instances(instance_actions.SUSPEND)
+     @check_instance_lock
+@@ -4992,11 +5023,18 @@ class API(base.Base):
+         # need resource allocation manipulation in placement but might also
+         # need a new scheduling if resource on this host is not available.
+         if port_id:
+-            port = self.network_api.show_port(context, port_id)
+-            if port['port'].get(constants.RESOURCE_REQUEST):
++            port = self.network_api.show_port(context, port_id)['port']
++            if port.get(constants.RESOURCE_REQUEST):
+                 raise exception.AttachInterfaceWithQoSPolicyNotSupported(
+                     instance_uuid=instance.uuid)
+ 
++            if port.get('binding:vnic_type', "normal") == "vdpa":
++                # FIXME(sean-k-mooney): Attach works but detach results in a
++                # QEMU error; blocked until this is resolved
++                raise exception.OperationNotSupportedForVDPAInterface(
++                    instance_uuid=instance.uuid,
++                    operation=instance_actions.ATTACH_INTERFACE)
++
+         return self.compute_rpcapi.attach_interface(context,
+             instance=instance, network_id=network_id, port_id=port_id,
+             requested_ip=requested_ip, tag=tag)
+@@ -5007,6 +5045,29 @@ class API(base.Base):
+                           task_state=[None])
+     def detach_interface(self, context, instance, port_id):
+         """Detach an network adapter from an instance."""
++
++        # FIXME(sean-k-mooney): Detach currently results in a failure to remove
++        # the interface from the live libvirt domain, so while the networking
++        # is torn down on the host the vDPA device is still attached to the VM.
++        # This is likely a libvirt/qemu bug so block detach until that is
++        # resolved.
++        for vif in instance.get_network_info():
++            if vif['id'] == port_id:
++                if vif['vnic_type'] == 'vdpa':
++                    raise exception.OperationNotSupportedForVDPAInterface(
++                        instance_uuid=instance.uuid,
++                        operation=instance_actions.DETACH_INTERFACE)
++                break
++        else:
++            # NOTE(sean-k-mooney) This should never happen but just in case the
++            # info cache does not have the port we are detaching we can fall
++            # back to neutron.
++            port = self.network_api.show_port(context, port_id)['port']
++            if port.get('binding:vnic_type', 'normal') == 'vdpa':
++                raise exception.OperationNotSupportedForVDPAInterface(
++                    instance_uuid=instance.uuid,
++                    operation=instance_actions.DETACH_INTERFACE)
++
+         self._record_action_start(
+             context, instance, instance_actions.DETACH_INTERFACE)
+         self.compute_rpcapi.detach_interface(context, instance=instance,
+@@ -5055,6 +5116,7 @@ class API(base.Base):
+                                                      diff=diff)
+         return _metadata
+ 
++    @reject_vdpa_instances(instance_actions.LIVE_MIGRATION)
+     @block_accelerators()
+     @reject_vtpm_instances(instance_actions.LIVE_MIGRATION)
+     @reject_sev_instances(instance_actions.LIVE_MIGRATION)
+@@ -5186,6 +5248,8 @@ class API(base.Base):
+         self.compute_rpcapi.live_migration_abort(context,
+                 instance, migration.id)
+ 
++    # FIXME(sean-k-mooney): rebuild works but we have not tested evacuate yet
++    @reject_vdpa_instances(instance_actions.EVACUATE)
+     @reject_vtpm_instances(instance_actions.EVACUATE)
+     @block_accelerators(until_service=SUPPORT_ACCELERATOR_SERVICE_FOR_REBUILD)
+     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.STOPPED,
+diff --git a/nova/exception.py b/nova/exception.py
+index 9ed4e7908a..a979301731 100644
+--- a/nova/exception.py
++++ b/nova/exception.py
+@@ -539,6 +539,14 @@ class OperationNotSupportedForVTPM(NovaException):
+     code = 409
+ 
+ 
++class OperationNotSupportedForVDPAInterface(NovaException):
++    msg_fmt = _(
++        "Operation '%(operation)s' not supported for instance with "
++        "vDPA ports ((instance_uuid)s)."
++    )
++    code = 409
++
++
+ class InvalidHypervisorType(Invalid):
+     msg_fmt = _("The supplied hypervisor type of is invalid.")
+ 
+-- 
+2.17.1
+
